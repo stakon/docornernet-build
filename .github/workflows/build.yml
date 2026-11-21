@@ -1,4 +1,4 @@
-name: Check DocCornerNet
+name: Build MobileNetV3 TFLite
 
 on:
   workflow_dispatch:
@@ -7,36 +7,58 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+
+    env:
+      CUDA_VISIBLE_DEVICES: "-1"
 
     steps:
-      - name: Скачать исходники DocCornerNet
+      - name: Скачать проверенную версию DocCornerNet
         uses: actions/checkout@v4
         with:
           repository: mapo80/DocCornerNet-CoordClass
-          ref: main
-          lfs: false
+          ref: d877dc382c4ec56299d2b2662b979581bae9c8cd
+          lfs: true
 
-      - name: Проверить веса и программы экспорта
-        shell: bash
+      - name: Установить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Установить зависимости
         run: |
-          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
 
-          echo "=== Версия исходников ==="
-          git rev-parse HEAD
+      - name: Проверить наличие весов
+        run: |
+          test -s checkpoints/mobilenetv3_224/best_model.weights.h5
+          test -s checkpoints/mobilenetv3_224/config.json
+          ls -lh checkpoints/mobilenetv3_224/best_model.weights.h5
 
-          echo "=== Файлы в корне проекта ==="
-          ls -lah
+      - name: Экспортировать MobileNetV3 в TFLite Float32
+        run: |
+          python export.py \
+            --weights checkpoints/mobilenetv3_224/best_model.weights.h5 \
+            --output_dir exported \
+            --format tflite
 
-          echo "=== Веса, конфигурации и файлы экспорта ==="
-          git ls-files | grep -Ei \
-            '(^checkpoints/|export|convert|requirements|mobilenetv3|\.pth$|\.pt$|\.ckpt$|\.h5$|\.keras$|\.tflite$|\.onnx$)' \
-            || true
+      - name: Проверить результат
+        run: |
+          test -s exported/model_float32.tflite
+          ls -lh exported/model_float32.tflite
+          cat exported/export_results.json
 
-          echo "=== Упоминания MobileNetV3 и команд экспорта ==="
-          git grep -n -I -i -E \
-            'mobilenetv3|export_tflite|representative_dataset|int8io|add_argument' \
-            -- '*.py' '*.md' '*.yaml' '*.yml' '*.json' '*.txt' \
-            | head -n 350 || true
+      - name: Сохранить модель и отчёт
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobilenetv3-224-float32
+          path: |
+            exported/model_float32.tflite
+            exported/export_results.json
+            checkpoints/mobilenetv3_224/config.json
+          if-no-files-found: error
+          retention-days: 7
