@@ -1,48 +1,42 @@
-name: Build TFLite
+name: Check DocCornerNet
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  inspect:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - name: Скачать DocCornerNet
+      - name: Скачать исходники DocCornerNet
         uses: actions/checkout@v4
         with:
           repository: mapo80/DocCornerNet-CoordClass
           ref: main
+          lfs: false
 
-      - name: Установить Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Установить зависимости
+      - name: Проверить веса и программы экспорта
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install huggingface_hub
+          set -euo pipefail
 
-      - name: Скачать калибровочный датасет
-        run: |
-          huggingface-cli download mapo80/DocCornerDataset \
-            --repo-type dataset \
-            --local-dir ./data
+          echo "=== Версия исходников ==="
+          git rev-parse HEAD
 
-      - name: Собрать mobilenetv3_224 INT8
-        run: |
-          python export_tflite_int8.py \
-            --checkpoint ./checkpoints/mobilenetv3_224 \
-            --data_root ./data \
-            --split val_cleaned \
-            --quantization int8 \
-            --io_dtype int8 \
-            --output_dtype int8 \
-            --output ./mobilenetv3_224_int8.tflite
+          echo "=== Файлы в корне проекта ==="
+          ls -lah
 
-      - name: Сохранить модель как артефакт
-        uses: actions/upload-artifact@v4
-        with:
-          name: tflite-model
-          path: ./*.tflite
+          echo "=== Веса, конфигурации и файлы экспорта ==="
+          git ls-files | grep -Ei \
+            '(^checkpoints/|export|convert|requirements|mobilenetv3|\.pth$|\.pt$|\.ckpt$|\.h5$|\.keras$|\.tflite$|\.onnx$)' \
+            || true
+
+          echo "=== Упоминания MobileNetV3 и команд экспорта ==="
+          git grep -n -I -i -E \
+            'mobilenetv3|export_tflite|representative_dataset|int8io|add_argument' \
+            -- '*.py' '*.md' '*.yaml' '*.yml' '*.json' '*.txt' \
+            | head -n 350 || true
