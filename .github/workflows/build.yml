@@ -39,6 +39,43 @@ jobs:
           test -s checkpoints/mobilenetv3_224/config.json
           ls -lh checkpoints/mobilenetv3_224/best_model.weights.h5
 
+      - name: Исправить печать выходов в программе экспорта
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("export.py")
+          text = path.read_text()
+
+          old = "\n".join([
+              '    print(f"  coords shape: {outputs[\'coords\'].shape}")',
+              '    print(f"  score shape: {outputs[\'score\'].shape}")',
+          ])
+
+          new = "\n".join([
+              '    if isinstance(outputs, dict):',
+              '        for name, value in outputs.items():',
+              '            print(f"  output {name}: shape={value.shape}, dtype={value.dtype}")',
+              '    elif isinstance(outputs, (list, tuple)):',
+              '        print(f"  model.output_names: {model.output_names}")',
+              '        for index, value in enumerate(outputs):',
+              '            print(f"  output[{index}]: shape={value.shape}, dtype={value.dtype}")',
+              '    else:',
+              '        print(f"  output: shape={outputs.shape}, dtype={outputs.dtype}")',
+          ])
+
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(
+                  f"Expected diagnostic block exactly once; found {count}"
+              )
+
+          updated = text.replace(old, new, 1)
+          compile(updated, str(path), "exec")
+          path.write_text(updated)
+          print("Diagnostic output fixed; model computation unchanged.")
+          PY
+
       - name: Экспортировать MobileNetV3 в TFLite Float32
         run: |
           python export.py \
