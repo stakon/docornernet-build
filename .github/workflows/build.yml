@@ -1,4 +1,4 @@
-name: Build MobileNetV3 TFLite
+name: Build MobileNetV3 TFLite Static
 
 on:
   workflow_dispatch:
@@ -39,63 +39,108 @@ jobs:
           test -s checkpoints/mobilenetv3_224/config.json
           ls -lh checkpoints/mobilenetv3_224/best_model.weights.h5
 
-      - name: Исправить печать выходов в программе экспорта
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("export.py")
-          text = path.read_text()
-
-          old = "\n".join([
-              '    print(f"  coords shape: {outputs[\'coords\'].shape}")',
-              '    print(f"  score shape: {outputs[\'score\'].shape}")',
-          ])
-
-          new = "\n".join([
-              '    if isinstance(outputs, dict):',
-              '        for name, value in outputs.items():',
-              '            print(f"  output {name}: shape={value.shape}, dtype={value.dtype}")',
-              '    elif isinstance(outputs, (list, tuple)):',
-              '        print(f"  model.output_names: {model.output_names}")',
-              '        for index, value in enumerate(outputs):',
-              '            print(f"  output[{index}]: shape={value.shape}, dtype={value.dtype}")',
-              '    else:',
-              '        print(f"  output: shape={outputs.shape}, dtype={outputs.dtype}")',
-          ])
-
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(
-                  f"Expected diagnostic block exactly once; found {count}"
-              )
-
-          updated = text.replace(old, new, 1)
-          compile(updated, str(path), "exec")
-          path.write_text(updated)
-          print("Diagnostic output fixed; model computation unchanged.")
-          PY
-
-      - name: Экспортировать MobileNetV3 в TFLite Float32
+      - name: Экспортировать SavedModel
         run: |
           python export.py \
             --weights checkpoints/mobilenetv3_224/best_model.weights.h5 \
             --output_dir exported \
-            --format tflite
+            --format savedmodel
+
+      - name: Собрать TFLite со статическим batch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tensorflow as tf
+
+          root = Path("exported")
+          candidates = list(root.rglob("saved_model.pb"))
+
+          if not candidates:
+              raise SystemExit("SavedModel not found under exported/")
+
+          model_dir = candidates[0].parent
+          print(f"Using SavedModel: {model_dir}")
+
+          model = tf.saved_model.load(str(model_dir))
+          serving = model.signatures["serving_default"]
+
+          input_specs = serving.structured_input_signature[1]
+
+          if len(input_specs) != 1:
+              raise SystemExit(
+                  f"Expected one model input, got: {list(input_specs)}"
+              )
+
+          input_name, input_spec = next(iter(input_specs.items()))
+
+          print(
+              f"Input: {input_name}, "
+              f"shape={input_spec.shape}, dtype={input_spec.dtype}"
+          )
+
+          @tf.function(input_signature=[
+              tf.TensorSpec(
+                  [1, 224, 224, 3],
+                  tf.float32,
+                  name=input_name
+              )
+          ])
+          def serve(image):
+              return serving(**{input_name: image})
+
+          concrete_function = serve.get_concrete_function()
+
+          converter = tf.lite.TFLiteConverter.from_concrete_functions([
+              concrete_function
+          ])
+
+          converter.target_spec.supported_ops = [
+              tf.lite.OpsSet.TFLITE_BUILTINS
+          ]
+
+          converter.inference_input_type = tf.float32
+          converter.inference_output_type = tf.float32
+
+          tflite_model = converter.convert()
+
+          output_path = root / "model_float32_static.tflite"
+          output_path.write_bytes(tflite_model)
+
+          print(f"Created: {output_path}")
+          print(f"Size: {len(tflite_model)} bytes")
+          PY
 
       - name: Проверить результат
         run: |
-          test -s exported/model_float32.tflite
-          ls -lh exported/model_float32.tflite
-          cat exported/export_results.json
+          test -s exported/model_float32_static.tflite
+          ls -lh exported/model_float32_static.tflite
 
-      - name: Сохранить модель и отчёт
+          python - <<'PY'
+          import tensorflow as tf
+
+          interpreter = tf.lite.Interpreter(
+              model_path="exported/model_float32_static.tflite"
+          )
+
+          interpreter.allocate_tensors()
+
+          input_details = interpreter.get_input_details()[0]
+          output_details = interpreter.get_output_details()
+
+          print("INPUT SHAPE:", input_details["shape"])
+          print("INPUT SIGNATURE:", input_details["shape_signature"])
+
+          for item in output_details:
+              print("OUTPUT SHAPE:", item["shape"])
+              print("OUTPUT SIGNATURE:", item["shape_signature"])
+          PY
+
+      - name: Сохранить модель и конфиг
         uses: actions/upload-artifact@v4
         with:
-          name: mobilenetv3-224-float32
+          name: mobilenetv3-224-float32-static
           path: |
-            exported/model_float32.tflite
-            exported/export_results.json
+            exported/model_float32_static.tflite
             checkpoints/mobilenetv3_224/config.json
           if-no-files-found: error
           retention-days: 7
